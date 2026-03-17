@@ -62,10 +62,10 @@
 	  * Format: list of chord lists, with chordlists having (key1, key2, key3, tempodiv)
 	  */
 	var/list/compiled_chords
-	/// Current section of a long chord we're on, so we don't need to make a billion chords, one for every unit ticklag.
-	var/elapsed_delay
-	/// Amount of delay to wait before playing the next chord
-	var/delay_by
+	/// Accumulated elapsed time in deciseconds since the last chord fired. Carries remainder forward to eliminate rounding drift.
+	var/elapsed_time_ds = 0
+	/// Time in deciseconds to wait before playing the next chord. Pure float, no integer rounding.
+	var/delay_ds = 0
 	/// Current chord we're on.
 	var/current_chord
 	/// Channel as text = current volume percentage but it's 0 to 100 instead of 0 to 1.
@@ -196,8 +196,12 @@
 
 /**
  * Attempts to start playing our song.
+ *
+ * Arguments:
+ * * user - The atom playing this song.
+ * * sync_start - world.time snapshot taken before compilation started, used to pre-offset elapsed_time_ds so synced instruments stay phase-aligned even if compile takes multiple ticks.
  */
-/datum/song/proc/start_playing(atom/user)
+/datum/song/proc/start_playing(atom/user, sync_start = null)
 	if(playing)
 		return
 	if(!using_instrument?.ready())
@@ -213,8 +217,9 @@
 	do_hearcheck()
 	SEND_SIGNAL(parent, COMSIG_INSTRUMENT_START, src, user)
 	SEND_SIGNAL(user, COMSIG_ATOM_STARTING_INSTRUMENT, src)
-	elapsed_delay = 0
-	delay_by = 0
+	// If a sync_start time was given, pre-offset by compile duration so secondary instruments start phase-aligned with the primary.
+	elapsed_time_ds = isnull(sync_start) ? 0 : (world.time - sync_start)
+	delay_ds = 0
 	current_chord = 1
 	music_player = user
 	START_PROCESSING(SSinstruments, src)
@@ -223,8 +228,10 @@
 
 /**
  * Attempts to find other instruments with the same ID and syncs them to our song.
+ * Records world.time before kicking off secondary compiles so all instruments share the same phase origin.
  */
 /datum/song/proc/sync_play()
+	var/sync_start = world.time
 	for(var/datum/song/other_instrument as anything in SSinstruments.songs)
 		if(other_instrument == src || other_instrument.id != id)
 			continue
@@ -237,7 +244,7 @@
 		other_instrument.lines = lines.Copy()
 		other_instrument.max_repeats = max_repeats
 		other_instrument.tempo = tempo
-		other_instrument.start_playing(other_player)
+		other_instrument.start_playing(other_player, sync_start)
 
 /**
  * Finds a player which would reasonably be able to play this song.
@@ -265,6 +272,8 @@
 
 /**
  * Processes our song.
+ * Uses float decisecond accumulation to eliminate per-note rounding drift.
+ * The remainder from each chord's overshoot carries forward into the next note's delay window.
  */
 /datum/song/proc/process_song(wait)
 	if(!length(compiled_chords))
@@ -274,12 +283,16 @@
 		stop_playing(FALSE)
 		return
 	var/list/chord = compiled_chords[current_chord]
-	elapsed_delay++
-	if(elapsed_delay < delay_by)
+	elapsed_time_ds += wait
+	if(elapsed_time_ds < delay_ds)
 		return
 	play_chord(chord)
-	elapsed_delay = 0
-	delay_by = tempodiv_to_delay(chord[length(chord)])
+	// Subtract rather than reset so overshoot carries into the next window, preventing drift accumulation.
+	elapsed_time_ds -= delay_ds
+	var/tempodiv = chord[length(chord)]
+	if(!tempodiv)
+		tempodiv = 1 // guard against 0-tempodiv entries from song converters
+	delay_ds = tempo / tempodiv
 	current_chord++
 	if(current_chord <= length(compiled_chords))
 		return
@@ -291,12 +304,14 @@
 	SEND_SIGNAL(parent, COMSIG_INSTRUMENT_REPEAT, TRUE)
 
 /**
- * Converts a tempodiv to ticks to elapse before playing the next chord, taking into account our tempo.
+ * Converts a tempodiv to deciseconds to wait before playing the next chord.
+ * NOTE: No longer used by the internal playback loop (process_song uses float accumulation directly).
+ * Retained for external callers and debug tooling.
  */
 /datum/song/proc/tempodiv_to_delay(tempodiv)
 	if(!tempodiv)
 		tempodiv = 1 // no division by 0. some song converters tend to use 0 for when it wants to have no div, for whatever reason.
-	return max(1, round((tempo/tempodiv) / world.tick_lag, 1))
+	return tempo / tempodiv
 
 /**
  * Compiles chords.

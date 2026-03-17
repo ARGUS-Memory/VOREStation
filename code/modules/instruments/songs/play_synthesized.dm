@@ -1,5 +1,6 @@
 /**
  * Compiles our lines into "chords" with numbers. This makes there have to be a bit of lag at the beginning of the song, but repeats will not have to parse it again, and overall playback won't be impacted by as much lag.
+ * CHECK_TICK between line iterations prevents this loop from stalling the server on long songs.
  */
 /datum/song/proc/compile_synthesized()
 	if(!length(src.lines))
@@ -9,6 +10,7 @@
 	var/list/octaves = list(3, 3, 3, 3, 3, 3, 3)
 	var/list/accents = list("n", "n", "n", "n", "n", "n", "n")
 	for(var/line in lines)
+		CHECK_TICK
 		var/list/chords = splittext(LOWER_TEXT(line), ",")
 		for(var/chord in chords)
 			var/list/compiled_chord = list()
