@@ -482,3 +482,152 @@
 
 /datum/pai_software/deathalarm/is_active(mob/living/silicon/pai/user)
 	return user.paiDA
+
+// ============================================================
+// Life Scanner
+// Scans nearby living mobs and prints health bars to chat,
+// similar to the vore prey healthbar system.
+// ============================================================
+
+/datum/pai_software/life_scanner
+	name = "Life Scanner"
+	ram_cost = 10
+	id = "life_scanner"
+
+/datum/pai_software/life_scanner/toggle(mob/living/silicon/pai/user)
+	var/scan_range = 7
+	var/found = FALSE
+
+	to_chat(user, span_notice("--- Life Scanner: Biosign sweep (range [scan_range]) ---"))
+
+	for(var/mob/living/M in range(scan_range, user))
+		if(M == user)
+			continue
+
+		found = TRUE
+
+		// Health percentage - mirror chat_healthbar logic
+		var/pct
+		if(ishuman(M))
+			pct = round(((M.health + 50) / (M.getMaxHealth() + 50)) * 100)
+		else
+			pct = round((M.health / M.getMaxHealth()) * 100)
+		pct = clamp(pct, 0, 100)
+
+		var/bar = chat_progress_bar(pct, TRUE)
+
+		// Species identification
+		var/species_str
+		if(ishuman(M))
+			var/mob/living/carbon/human/H = M
+			species_str = H.species.name
+		else if(isrobot(M))
+			species_str = "Synthetic"
+		else if(ispAI(M))
+			species_str = "Personal AI"
+		else
+			species_str = "Unknown"
+
+		// Status suffix
+		var/stat_suffix = ""
+		if(M.stat == UNCONSCIOUS)
+			stat_suffix = " - [span_orange(span_bold("UNCONSCIOUS"))]"
+		else if(M.stat == DEAD)
+			stat_suffix = " - [span_red(span_bold("DEAD"))]"
+
+		to_chat(user, span_notice("[bar] [M.name] ([species_str])[stat_suffix]"))
+
+	if(!found)
+		to_chat(user, span_warning("No life signs detected within range."))
+
+	to_chat(user, span_notice("--- End of scan ---"))
+
+/datum/pai_software/life_scanner/is_active(mob/living/silicon/pai/user)
+	return FALSE  // Scan-on-activate; never latches on
+
+// ============================================================
+// Distress Relay
+// Locates the pAI's master and broadcasts an emergency alert
+// on Medical and Security channels. 3-minute cooldown.
+// ============================================================
+
+/datum/pai_software/distress_relay
+	name = "Distress Relay"
+	ram_cost = 20
+	id = "distress_relay"
+	var/relay_cooldown = 0  // world.time when cooldown expires
+
+/datum/pai_software/distress_relay/toggle(mob/living/silicon/pai/user)
+	if(!user.master)
+		to_chat(user, span_warning("No master assigned. Cannot relay distress signal."))
+		return
+
+	if(world.time < relay_cooldown)
+		var/remaining = round((relay_cooldown - world.time) / 10)
+		to_chat(user, span_warning("Distress relay cooling down. [remaining]s remaining."))
+		return
+
+	var/confirm = tgui_alert(user, "Broadcast emergency alert for [user.master] on Medical and Security channels?", "Distress Relay", list("Broadcast", "Cancel"))
+	if(confirm != "Broadcast")
+		return
+
+	// Locate master mob by name + DNA match
+	var/mob/living/master_mob = null
+	for(var/mob/living/L in GLOB.player_list)
+		if(L.name == user.master)
+			if(ishuman(L))
+				var/mob/living/carbon/human/H = L
+				if(H.dna && H.dna.unique_enzymes == user.master_dna)
+					master_mob = L
+					break
+			else
+				master_mob = L
+				break
+
+	// Build location string
+	var/location_str = "unknown location"
+	if(master_mob)
+		var/area/A = get_area(master_mob)
+		if(A)
+			location_str = A.name
+	else
+		// Master mob not found; fall back to pAI's own location
+		var/area/A = get_area(user)
+		if(A)
+			location_str = "[A.name] (pAI last known position)"
+
+	var/alert_msg = "EMERGENCY: [user.master] requires immediate assistance. Last known location: [location_str]. This is an automated alert from [user.name]."
+
+	// Temporarily register Medical and Security on the pAI radio if not already present
+	var/added_med = FALSE
+	var/added_sec = FALSE
+
+	if(!(CHANNEL_MEDICAL in user.radio.channels))
+		user.radio.channels[CHANNEL_MEDICAL] = 1
+		user.radio.secure_radio_connections[CHANNEL_MEDICAL] = SSradio.add_object(user.radio, GLOB.radiochannels[CHANNEL_MEDICAL], RADIO_CHAT)
+		added_med = TRUE
+
+	if(!(CHANNEL_SECURITY in user.radio.channels))
+		user.radio.channels[CHANNEL_SECURITY] = 1
+		user.radio.secure_radio_connections[CHANNEL_SECURITY] = SSradio.add_object(user.radio, GLOB.radiochannels[CHANNEL_SECURITY], RADIO_CHAT)
+		added_sec = TRUE
+
+	user.radio.talk_into(user, alert_msg, CHANNEL_MEDICAL, "broadcasts")
+	user.radio.talk_into(user, alert_msg, CHANNEL_SECURITY, "broadcasts")
+
+	// Restore channels
+	if(added_med)
+		SSradio.remove_object(user.radio, GLOB.radiochannels[CHANNEL_MEDICAL])
+		user.radio.channels.Remove(CHANNEL_MEDICAL)
+		user.radio.secure_radio_connections.Remove(CHANNEL_MEDICAL)
+	if(added_sec)
+		SSradio.remove_object(user.radio, GLOB.radiochannels[CHANNEL_SECURITY])
+		user.radio.channels.Remove(CHANNEL_SECURITY)
+		user.radio.secure_radio_connections.Remove(CHANNEL_SECURITY)
+
+	relay_cooldown = world.time + 3 MINUTES
+
+	to_chat(user, span_notice("Distress relay broadcast sent on Medical and Security channels."))
+
+/datum/pai_software/distress_relay/is_active(mob/living/silicon/pai/user)
+	return FALSE  // No persistent active state
